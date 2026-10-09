@@ -18,6 +18,7 @@ import (
 	"github.com/MunifTanjim/stremthru/store/debrider"
 	"github.com/MunifTanjim/stremthru/store/debridlink"
 	"github.com/MunifTanjim/stremthru/store/easydebrid"
+	"github.com/MunifTanjim/stremthru/store/kizaru"
 	"github.com/MunifTanjim/stremthru/store/offcloud"
 	"github.com/MunifTanjim/stremthru/store/pikpak"
 	"github.com/MunifTanjim/stremthru/store/premiumize"
@@ -42,6 +43,10 @@ var dlStore = debridlink.NewStoreClient(&debridlink.StoreClientConfig{
 })
 var edStore = easydebrid.NewStoreClient(&easydebrid.StoreClientConfig{
 	HTTPClient: config.GetHTTPClient(config.StoreTunnel.GetTypeForAPI("easydebrid")),
+	UserAgent:  config.StoreClientUserAgent,
+})
+var kzStore = kizaru.NewStoreClient(&kizaru.StoreClientConfig{
+	HTTPClient: config.GetHTTPClient(config.StoreTunnel.GetTypeForAPI("kizaru")),
 	UserAgent:  config.StoreClientUserAgent,
 })
 var pmStore = premiumize.NewStoreClient(&premiumize.StoreClientConfig{
@@ -80,6 +85,8 @@ func GetStore(name string) store.Store {
 		return dlStore
 	case store.StoreNameEasyDebrid:
 		return edStore
+	case store.StoreNameKizaru:
+		return kzStore
 	case store.StoreNameOffcloud:
 		return ocStore
 	case store.StoreNamePikPak:
@@ -109,6 +116,8 @@ func GetStoreByCode(code string) store.Store {
 		return dlStore
 	case store.StoreCodeEasyDebrid:
 		return edStore
+	case store.StoreCodeKizaru:
+		return kzStore
 	case store.StoreCodeOffcloud:
 		return ocStore
 	case store.StoreCodePikPak:

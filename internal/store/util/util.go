@@ -7,7 +7,7 @@ import (
 
 func RecordTorrentInfoFromListMagnets(storeCode store.StoreCode, items []store.ListMagnetsDataItem) {
 	switch storeCode {
-	case store.StoreCodeAllDebrid, store.StoreCodeDebridLink, store.StoreCodeRealDebrid, store.StoreCodeTorBox:
+	case store.StoreCodeAllDebrid, store.StoreCodeDebridLink, store.StoreCodeRealDebrid, store.StoreCodeTorBox, store.StoreCodeKizaru:
 		break
 	default:
 		return
