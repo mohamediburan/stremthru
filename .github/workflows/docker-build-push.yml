@@ -60,7 +60,11 @@ jobs:
 
       - name: Calculate Image Tags
         env:
-          INPUT_REF: ${{inputs.ref}}
+          # `inputs.ref` exists only for workflow_dispatch. On a push it is empty,
+          # and the case statement below would fall through to its error branch —
+          # which is exactly what happened on the first push-triggered run. Falling
+          # back to the pushed branch name makes both triggers work.
+          INPUT_REF: ${{ inputs.ref || github.ref_name }}
         run: |
           declare TAGS=""
           case "${INPUT_REF}" in
