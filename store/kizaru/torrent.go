@@ -23,13 +23,18 @@ type Torrent struct {
 	CreatedAt string `json:"createdAt"`
 }
 
-// TorrentFile mirrors Kizaru's file record. S3Key is only populated once the
-// file has been fetched and uploaded, which is what makes it playable.
+// TorrentFile mirrors Kizaru's file record.
+//
+// There is deliberately NO s3Key field. Kizaru stopped publishing it — it is
+// the object layout of its bucket, not client state — and a filter on it is
+// what silently emptied every file list: the field never unmarshals, so every
+// file looks un-uploaded. Playability is a TORRENT-wide property (a `cached`
+// torrent has every file uploaded), so it is read from the torrent status,
+// never inferred per file.
 type TorrentFile struct {
 	FileIndex int    `json:"fileIndex"`
 	Path      string `json:"path"`
 	Size      int64  `json:"size"`
-	S3Key     string `json:"s3Key"`
 }
 
 type TorrentDetailData struct {
@@ -144,8 +149,12 @@ func (c APIClient) CreateTorrent(params *CreateTorrentParams) (APIResponse[Creat
 
 type ListTorrentsParams struct {
 	Ctx
-	Limit  int
-	Offset int
+	Limit int
+	// Cursor is Kizaru's keyset anchor — the X-Next-Cursor of the previous
+	// page. There is deliberately no `offset`: the head of the list moves
+	// whenever a torrent is added, so an offset would repeat or skip rows, and
+	// the engine ignores the parameter entirely.
+	Cursor string
 }
 
 type ListTorrentsData []Torrent
@@ -153,7 +162,9 @@ type ListTorrentsData []Torrent
 func (c APIClient) ListTorrents(params *ListTorrentsParams) (APIResponse[ListTorrentsData], error) {
 	query := &url.Values{}
 	query.Add("limit", strconv.Itoa(params.Limit))
-	query.Add("offset", strconv.Itoa(params.Offset))
+	if params.Cursor != "" {
+		query.Add("cursor", params.Cursor)
+	}
 	params.Query = query
 
 	response := &Response[ListTorrentsData]{}
@@ -243,16 +254,19 @@ func magnetFiles(hash string, files []CachedFile) []store.MagnetFile {
 	return out
 }
 
-// playableFiles keeps only the files Kizaru has actually fetched and uploaded.
+// playableFiles returns the files a caller may mint a link for.
 //
-// A torrent can be globally cached while individual files are still being
-// pulled, and an unuploaded file has no presigned URL to hand out.
-func playableFiles(hash string, files []TorrentFile) []store.MagnetFile {
+// Readiness is per TORRENT, never per file: Kizaru marks a torrent `cached`
+// only once every file in it has been uploaded, and a subset is not something
+// the API can transfer. The per-file s3Key this used to test is no longer
+// published, which made the old filter drop every file; the status is the
+// signal now, and it is the same one the engine gates /stream on.
+func playableFiles(hash, status string, files []TorrentFile) []store.MagnetFile {
 	out := []store.MagnetFile{}
+	if magnetStatus(status) != store.MagnetStatusCached {
+		return out
+	}
 	for _, f := range files {
-		if f.S3Key == "" {
-			continue
-		}
 		name := f.Path
 		if idx := strings.LastIndex(name, "/"); idx >= 0 {
 			name = name[idx+1:]

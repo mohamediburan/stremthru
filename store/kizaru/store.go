@@ -2,6 +2,7 @@ package kizaru
 
 import (
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/MunifTanjim/stremthru/core"
@@ -156,7 +157,7 @@ func (c *StoreClient) AddMagnet(params *store.AddMagnetParams) (*store.AddMagnet
 		data.Status = magnetStatus(detail.Data.Torrent.Status)
 		data.Name = detail.Data.Torrent.Name
 		data.Size = detail.Data.Torrent.TotalSize
-		data.Files = playableFiles(torrent.InfoHash, detail.Data.Files)
+		data.Files = playableFiles(torrent.InfoHash, detail.Data.Torrent.Status, detail.Data.Files)
 	}
 
 	return data, nil
@@ -184,7 +185,7 @@ func (c *StoreClient) GetMagnet(params *store.GetMagnetParams) (*store.GetMagnet
 		Name:    torrent.Name,
 		Size:    torrent.TotalSize,
 		Status:  magnetStatus(torrent.Status),
-		Files:   playableFiles(torrent.InfoHash, res.Data.Files),
+		Files:   playableFiles(torrent.InfoHash, torrent.Status, res.Data.Files),
 		AddedAt: torrentAddedAt(torrent),
 	}
 
@@ -201,17 +202,46 @@ func (c *StoreClient) ListMagnets(params *store.ListMagnetsParams) (*store.ListM
 		limit = maxListLimit
 	}
 
-	res, err := c.client.ListTorrents(&ListTorrentsParams{
-		Ctx:    params.Ctx,
-		Limit:  limit,
-		Offset: params.Offset,
-	})
-	if err != nil {
-		return nil, err
+	// Kizaru pages by keyset cursor, not by offset: the head of the list moves
+	// whenever a torrent is added, so an OFFSET would repeat or skip a row — and
+	// the engine ignores the parameter outright, which made every page after the
+	// first re-serve page one. The store interface still pages by position, so
+	// walk the cursor chain from the head to the page the caller asked for and
+	// drop the remainder. Bounded by offset/limit round trips.
+	offset := params.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	skip := offset % limit
+
+	var res APIResponse[ListTorrentsData]
+	var err error
+	cursor := ""
+	for remaining := offset / limit; ; remaining-- {
+		res, err = c.client.ListTorrents(&ListTorrentsParams{
+			Ctx:    params.Ctx,
+			Limit:  limit,
+			Cursor: cursor,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if remaining <= 0 {
+			break
+		}
+		cursor = res.Header.Get("X-Next-Cursor")
+		if cursor == "" {
+			// The library ended before that offset: there is no such page.
+			return &store.ListMagnetsData{
+				Items:      []store.ListMagnetsDataItem{},
+				TotalItems: listTotalItems(res, offset, limit),
+			}, nil
+		}
 	}
 
 	data := &store.ListMagnetsData{
-		Items: []store.ListMagnetsDataItem{},
+		Items:      []store.ListMagnetsDataItem{},
+		TotalItems: listTotalItems(res, offset, limit),
 	}
 	for _, t := range res.Data {
 		data.Items = append(data.Items, store.ListMagnetsDataItem{
@@ -223,13 +253,12 @@ func (c *StoreClient) ListMagnets(params *store.ListMagnetsParams) (*store.ListM
 			AddedAt: torrentAddedAt(t),
 		})
 	}
-
-	// Kizaru's list endpoint reports no total, so infer one the way the other
-	// stores do: a full page means there is probably at least one more.
-	count := len(data.Items)
-	data.TotalItems = params.Offset + count
-	if count == limit {
-		data.TotalItems += 1
+	if skip > 0 {
+		if skip >= len(data.Items) {
+			data.Items = []store.ListMagnetsDataItem{}
+		} else {
+			data.Items = data.Items[skip:]
+		}
 	}
 
 	return data, nil
@@ -237,6 +266,24 @@ func (c *StoreClient) ListMagnets(params *store.ListMagnetsParams) (*store.ListM
 
 // maxListLimit is Kizaru's cap on a single page of the library.
 const maxListLimit = 100
+
+// listTotalItems reads the X-Total-Count aggregate the engine sends with every
+// page. Older builds omit it, so fall back to the old inference: a full page
+// means there is probably at least one more.
+func listTotalItems(res APIResponse[ListTorrentsData], offset, limit int) int {
+	if total, err := strconv.Atoi(res.Header.Get("X-Total-Count")); err == nil {
+		return total
+	}
+	count := len(res.Data)
+	if count == 0 {
+		return 0
+	}
+	total := offset + count
+	if count == limit {
+		total++
+	}
+	return total
+}
 
 func (c *StoreClient) RemoveMagnet(params *store.RemoveMagnetParams) (*store.RemoveMagnetData, error) {
 	// Kizaru identifies torrents by info hash.

@@ -309,6 +309,10 @@ func TestMagnetStatusMapping(t *testing.T) {
 
 // The add response must round-trip through the shape Comet reads: status plus a
 // file list whose links are the opaque tokens GenerateLink accepts.
+//
+// The mock deliberately omits s3Key. Kizaru stopped publishing it, and the old
+// per-file filter treated every file as un-uploaded once it was gone — which is
+// how the integration went from working to "No video files found" overnight.
 func TestAddMagnetReturnsPlayableFiles(t *testing.T) {
 	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -317,7 +321,7 @@ func TestAddMagnetReturnsPlayableFiles(t *testing.T) {
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"message":"Torrent registered successfully","torrent":{"id":"t1","infoHash":"abc","name":"Show.S01","totalSize":50,"status":"cached"}}`))
 		case http.MethodGet:
-			_, _ = w.Write([]byte(`{"torrent":{"id":"t1","infoHash":"abc","name":"Show.S01","totalSize":50,"status":"cached"},"files":[{"fileIndex":2,"path":"Show.S01/e01.mkv","size":50,"s3Key":"k"}]}`))
+			_, _ = w.Write([]byte(`{"torrent":{"id":"t1","infoHash":"abc","name":"Show.S01","totalSize":50,"status":"cached"},"files":[{"fileIndex":2,"path":"Show.S01/e01.mkv","size":50}]}`))
 		}
 	})
 
@@ -336,6 +340,90 @@ func TestAddMagnetReturnsPlayableFiles(t *testing.T) {
 	}
 	if data.Magnet == "" {
 		t.Error("magnet must be echoed back for the client to keep")
+	}
+}
+
+// Readiness is torrent-wide, never per file. Kizaru publishes no per-file key,
+// so the status is the only signal there is — and it is the right one, because
+// a torrent is marked `cached` only once every file has been uploaded.
+func TestPlayableFilesRequiresReadyTorrent(t *testing.T) {
+	files := []TorrentFile{{FileIndex: 0, Path: "Show.S01/e01.mkv", Size: 10}}
+
+	for _, waiting := range []string{"meta_pending", "downloading", "uploading", "error", ""} {
+		if got := playableFiles("abc", waiting, files); len(got) != 0 {
+			t.Errorf("%q: got %d files, want 0", waiting, len(got))
+		}
+	}
+	for _, ready := range []string{"cached", "uploaded", "seeding"} {
+		if got := playableFiles("abc", ready, files); len(got) != 1 {
+			t.Errorf("%q: got %d files, want 1", ready, len(got))
+		}
+	}
+}
+
+// ListMagnets must follow X-Next-Cursor. Kizaru's list endpoint is keyset-paged
+// and ignores `offset`, so a client that still sends one is answered with page
+// one forever — which is what the previous implementation did.
+func TestListMagnetsFollowsCursor(t *testing.T) {
+	var cursors []string
+	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/torrents" {
+			t.Errorf("path = %q, want the library endpoint", r.URL.Path)
+		}
+		if off := r.URL.Query().Get("offset"); off != "" {
+			t.Errorf("sent offset=%q, which the engine ignores", off)
+		}
+		cursor := r.URL.Query().Get("cursor")
+		cursors = append(cursors, cursor)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Total-Count", "3")
+		if cursor == "" {
+			w.Header().Set("X-Next-Cursor", "page-2")
+			_, _ = w.Write([]byte(`[
+				{"id":"t1","infoHash":"h1","name":"a","totalSize":1,"status":"cached"},
+				{"id":"t2","infoHash":"h2","name":"b","totalSize":2,"status":"downloading"}
+			]`))
+			return
+		}
+		if cursor != "page-2" {
+			t.Errorf("cursor = %q, want page-2", cursor)
+		}
+		_, _ = w.Write([]byte(`[{"id":"t3","infoHash":"h3","name":"c","totalSize":3,"status":"cached"}]`))
+	})
+
+	data, err := c.ListMagnets(&store.ListMagnetsParams{Limit: 2, Offset: 2})
+	if err != nil {
+		t.Fatalf("ListMagnets: %v", err)
+	}
+	if len(cursors) != 2 || cursors[0] != "" || cursors[1] != "page-2" {
+		t.Errorf("cursors = %q, want [\"\" \"page-2\"]", cursors)
+	}
+	if len(data.Items) != 1 || data.Items[0].Id != "t3" {
+		t.Errorf("items = %+v, want just t3", data.Items)
+	}
+	if data.TotalItems != 3 {
+		t.Errorf("total = %d, want 3 from X-Total-Count", data.TotalItems)
+	}
+}
+
+// A page the library cannot reach must be empty, not silently page one.
+func TestListMagnetsPastTheEndIsEmpty(t *testing.T) {
+	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Total-Count", "1")
+		_, _ = w.Write([]byte(`[{"id":"t1","infoHash":"h1","name":"a","totalSize":1,"status":"cached"}]`))
+	})
+
+	data, err := c.ListMagnets(&store.ListMagnetsParams{Limit: 2, Offset: 4})
+	if err != nil {
+		t.Fatalf("ListMagnets: %v", err)
+	}
+	if len(data.Items) != 0 {
+		t.Errorf("items = %+v, want none", data.Items)
+	}
+	if data.TotalItems != 1 {
+		t.Errorf("total = %d, want 1", data.TotalItems)
 	}
 }
 
