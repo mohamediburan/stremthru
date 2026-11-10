@@ -10,17 +10,32 @@ import (
 	"github.com/MunifTanjim/stremthru/internal/request"
 )
 
-// errorResponse is Kizaru's failure envelope: {"error": "..."}.
-type errorResponse struct {
-	Error string `json:"error"`
+// errorEnvelope is Kizaru's failure body:
+// {"error": {"code": "…", "message": "…"}}.
+//
+// `code` is stable; `message` is copy. The store's error vocabulary is still
+// derived from the status — Code is carried for logs, never matched on.
+type errorEnvelope struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// ListMeta is the page metadata Kizaru sends beside the rows. It used to travel
+// as X-Total-Count / X-Next-Cursor headers.
+type ListMeta struct {
+	Total      int    `json:"total"`
+	NextCursor string `json:"nextCursor"`
 }
 
 // ResponseError is an error Kizaru answered with.
 //
-// Kizaru carries no machine-readable error code — its HTTP status is the signal —
-// so Status is what TranslateErrorCode keys off.
+// Status is what TranslateErrorCode keys off; Code is Kizaru's own identifier
+// and is kept for logs.
 type ResponseError struct {
 	Err    string `json:"error,omitempty"`
+	Code   string `json:"code,omitempty"`
 	Status int    `json:"status_code,omitempty"`
 }
 
@@ -31,19 +46,23 @@ func (e *ResponseError) Error() string {
 
 // Response is the envelope passed to request.ProcessResponseBody.
 //
-// Unlike the providers that wrap payloads in a success/data object, Kizaru
-// returns the payload bare and signals failure purely by status code, so the
-// only branch that matters here is "did this fail, and what did it say".
+// Every Kizaru response is one of two shapes:
+//
+//	{"data": …, "meta": …}                 // 2xx
+//	{"error": {"code": …, "message": …}}   // 4xx/5xx
+//
+// so the decode has exactly one branch: which of the two arrived.
 type Response[T any] struct {
 	Data T
+	Meta ListMeta
 	err  *ResponseError
 }
 
 func (r *Response[T]) Unmarshal(res *http.Response, body []byte, v any) error {
 	if res.StatusCode >= http.StatusBadRequest {
-		parsed := errorResponse{}
-		if err := json.Unmarshal(body, &parsed); err == nil && parsed.Error != "" {
-			r.err = &ResponseError{Err: parsed.Error, Status: res.StatusCode}
+		parsed := errorEnvelope{}
+		if err := json.Unmarshal(body, &parsed); err == nil && parsed.Error.Message != "" {
+			r.err = &ResponseError{Err: parsed.Error.Message, Code: parsed.Error.Code, Status: res.StatusCode}
 			return nil
 		}
 		msg := strings.TrimSpace(string(body))
@@ -59,7 +78,21 @@ func (r *Response[T]) Unmarshal(res *http.Response, body []byte, v any) error {
 		return nil
 	}
 
-	return core.UnmarshalJSON(res.StatusCode, body, &r.Data)
+	// Decode the envelope first: the payload belongs to the caller's type, and the
+	// page numbers belong to Meta. A body that is not an envelope is handed over
+	// unchanged so the decode error names the real problem.
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+		Meta ListMeta        `json:"meta"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return core.UnmarshalJSON(res.StatusCode, body, &r.Data)
+	}
+	r.Meta = envelope.Meta
+	if len(envelope.Data) == 0 || string(envelope.Data) == "null" {
+		return nil
+	}
+	return core.UnmarshalJSON(res.StatusCode, envelope.Data, &r.Data)
 }
 
 func (r *Response[T]) GetError(res *http.Response) error {

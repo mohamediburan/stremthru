@@ -159,7 +159,15 @@ type ListTorrentsParams struct {
 
 type ListTorrentsData []Torrent
 
-func (c APIClient) ListTorrents(params *ListTorrentsParams) (APIResponse[ListTorrentsData], error) {
+// ListTorrentsPage is one page plus the paging numbers that travel in `meta`:
+// a page cannot describe its own totals, so they arrive beside the rows.
+type ListTorrentsPage struct {
+	Rows       ListTorrentsData
+	Total      int
+	NextCursor string
+}
+
+func (c APIClient) ListTorrents(params *ListTorrentsParams) (APIResponse[ListTorrentsPage], error) {
 	query := &url.Values{}
 	query.Add("limit", strconv.Itoa(params.Limit))
 	if params.Cursor != "" {
@@ -169,7 +177,12 @@ func (c APIClient) ListTorrents(params *ListTorrentsParams) (APIResponse[ListTor
 
 	response := &Response[ListTorrentsData]{}
 	res, err := c.Request(http.MethodGet, "/api/v1/torrents", params, response)
-	return newAPIResponse(res, response.Data), err
+	page := ListTorrentsPage{
+		Rows:       response.Data,
+		Total:      response.Meta.Total,
+		NextCursor: response.Meta.NextCursor,
+	}
+	return newAPIResponse(res, page), err
 }
 
 type GetTorrentParams struct {

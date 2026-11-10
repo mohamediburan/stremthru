@@ -27,7 +27,7 @@ func TestClientSendsAPIKeyHeader(t *testing.T) {
 	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		gotKey = r.Header.Get("X-API-Key")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"u1","userId":"u1","plan":"pro","status":"active"}`))
+		_, _ = w.Write([]byte(`{"data":{"id":"u1","userId":"u1","plan":"pro","status":"active"}}`))
 	})
 
 	params := &store.GetUserParams{}
@@ -52,7 +52,7 @@ func TestNoAPIKeyFallback(t *testing.T) {
 	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		gotKey = r.Header.Get("X-API-Key")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"u1","userId":"u1","status":"active"}`))
+		_, _ = w.Write([]byte(`{"data":{"id":"u1","userId":"u1","status":"active"}}`))
 	})
 
 	if _, err := c.GetUser(&store.GetUserParams{}); err != nil {
@@ -70,7 +70,7 @@ func TestNoAPIKeyFallback(t *testing.T) {
 func TestGetUserWithoutPassIsExpired(t *testing.T) {
 	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`null`))
+		_, _ = w.Write([]byte(`{"data":null}`))
 	})
 
 	user, err := c.GetUser(&store.GetUserParams{})
@@ -86,7 +86,7 @@ func TestGetUserWithoutPassIsExpired(t *testing.T) {
 func TestGetUserLapsedPassIsExpired(t *testing.T) {
 	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"u1","userId":"u1","plan":"pro","status":"expired"}`))
+		_, _ = w.Write([]byte(`{"data":{"id":"u1","userId":"u1","plan":"pro","status":"expired"}}`))
 	})
 
 	user, err := c.GetUser(&store.GetUserParams{})
@@ -112,13 +112,13 @@ func TestCheckMagnetMapsDetailedResponse(t *testing.T) {
 			t.Errorf("path = %q, want the cache-check endpoint", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"items":[{
+		_, _ = w.Write([]byte(`{"data":{"items":[{
 			"hash":"` + cachedHash + `",
 			"status":"cached",
 			"name":"Some.Movie.2024.1080p",
 			"totalSize":100,
 			"files":[{"fileIndex":0,"path":"Some.Movie.2024.1080p/movie.mkv","name":"movie.mkv","size":90}]
-		}]}`))
+		}]}}`))
 	})
 
 	params := &store.CheckMagnetParams{}
@@ -179,7 +179,7 @@ func TestGenerateLinkUsesStreamEndpoint(t *testing.T) {
 	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"url":"` + signed + `"}`))
+		_, _ = w.Write([]byte(`{"data":{"url":"` + signed + `"}}`))
 	})
 
 	res, err := c.GenerateLink(&store.GenerateLinkParams{Link: FileLink("").Create(hash, 7)})
@@ -212,7 +212,7 @@ func TestUpstreamErrorTranslatesStatus(t *testing.T) {
 	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":"Torrent not found"}`))
+		_, _ = w.Write([]byte(`{"error":{"code":"TORRENT_NOT_FOUND","message":"Torrent not found"}}`))
 	})
 
 	_, err := c.GetMagnet(&store.GetMagnetParams{Id: "deadbeef"})
@@ -242,7 +242,7 @@ func TestRateLimitPreservesRetryAfter(t *testing.T) {
 	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "42")
 		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write([]byte(`{"error":"slow down"}`))
+		_, _ = w.Write([]byte(`{"error":{"code":"RATE_LIMITED","message":"slow down"}}`))
 	})
 
 	_, err := c.GetUser(&store.GetUserParams{})
@@ -319,9 +319,9 @@ func TestAddMagnetReturnsPlayableFiles(t *testing.T) {
 		switch r.Method {
 		case http.MethodPost:
 			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"message":"Torrent registered successfully","torrent":{"id":"t1","infoHash":"abc","name":"Show.S01","totalSize":50,"status":"cached"}}`))
+			_, _ = w.Write([]byte(`{"data":{"message":"Torrent registered successfully","torrent":{"id":"t1","infoHash":"abc","name":"Show.S01","totalSize":50,"status":"cached"}}}`))
 		case http.MethodGet:
-			_, _ = w.Write([]byte(`{"torrent":{"id":"t1","infoHash":"abc","name":"Show.S01","totalSize":50,"status":"cached"},"files":[{"fileIndex":2,"path":"Show.S01/e01.mkv","size":50}]}`))
+			_, _ = w.Write([]byte(`{"data":{"torrent":{"id":"t1","infoHash":"abc","name":"Show.S01","totalSize":50,"status":"cached"},"files":[{"fileIndex":2,"path":"Show.S01/e01.mkv","size":50}]}}`))
 		}
 	})
 
@@ -377,19 +377,17 @@ func TestListMagnetsFollowsCursor(t *testing.T) {
 		cursors = append(cursors, cursor)
 
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Total-Count", "3")
 		if cursor == "" {
-			w.Header().Set("X-Next-Cursor", "page-2")
-			_, _ = w.Write([]byte(`[
+			_, _ = w.Write([]byte(`{"data":[
 				{"id":"t1","infoHash":"h1","name":"a","totalSize":1,"status":"cached"},
 				{"id":"t2","infoHash":"h2","name":"b","totalSize":2,"status":"downloading"}
-			]`))
+			],"meta":{"total":3,"nextCursor":"page-2"}}`))
 			return
 		}
 		if cursor != "page-2" {
 			t.Errorf("cursor = %q, want page-2", cursor)
 		}
-		_, _ = w.Write([]byte(`[{"id":"t3","infoHash":"h3","name":"c","totalSize":3,"status":"cached"}]`))
+		_, _ = w.Write([]byte(`{"data":[{"id":"t3","infoHash":"h3","name":"c","totalSize":3,"status":"cached"}],"meta":{"total":3}}`))
 	})
 
 	data, err := c.ListMagnets(&store.ListMagnetsParams{Limit: 2, Offset: 2})
@@ -411,8 +409,7 @@ func TestListMagnetsFollowsCursor(t *testing.T) {
 func TestListMagnetsPastTheEndIsEmpty(t *testing.T) {
 	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Total-Count", "1")
-		_, _ = w.Write([]byte(`[{"id":"t1","infoHash":"h1","name":"a","totalSize":1,"status":"cached"}]`))
+		_, _ = w.Write([]byte(`{"data":[{"id":"t1","infoHash":"h1","name":"a","totalSize":1,"status":"cached"}],"meta":{"total":1}}`))
 	})
 
 	data, err := c.ListMagnets(&store.ListMagnetsParams{Limit: 2, Offset: 4})

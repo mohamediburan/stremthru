@@ -2,7 +2,6 @@ package kizaru
 
 import (
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/MunifTanjim/stremthru/core"
@@ -214,7 +213,7 @@ func (c *StoreClient) ListMagnets(params *store.ListMagnetsParams) (*store.ListM
 	}
 	skip := offset % limit
 
-	var res APIResponse[ListTorrentsData]
+	var res APIResponse[ListTorrentsPage]
 	var err error
 	cursor := ""
 	for remaining := offset / limit; ; remaining-- {
@@ -229,21 +228,21 @@ func (c *StoreClient) ListMagnets(params *store.ListMagnetsParams) (*store.ListM
 		if remaining <= 0 {
 			break
 		}
-		cursor = res.Header.Get("X-Next-Cursor")
+		cursor = res.Data.NextCursor
 		if cursor == "" {
 			// The library ended before that offset: there is no such page.
 			return &store.ListMagnetsData{
 				Items:      []store.ListMagnetsDataItem{},
-				TotalItems: listTotalItems(res, offset, limit),
+				TotalItems: listTotalItems(res.Data, offset, limit),
 			}, nil
 		}
 	}
 
 	data := &store.ListMagnetsData{
 		Items:      []store.ListMagnetsDataItem{},
-		TotalItems: listTotalItems(res, offset, limit),
+		TotalItems: listTotalItems(res.Data, offset, limit),
 	}
-	for _, t := range res.Data {
+	for _, t := range res.Data.Rows {
 		data.Items = append(data.Items, store.ListMagnetsDataItem{
 			Id:      t.Id,
 			Hash:    t.InfoHash,
@@ -267,14 +266,14 @@ func (c *StoreClient) ListMagnets(params *store.ListMagnetsParams) (*store.ListM
 // maxListLimit is Kizaru's cap on a single page of the library.
 const maxListLimit = 100
 
-// listTotalItems reads the X-Total-Count aggregate the engine sends with every
-// page. Older builds omit it, so fall back to the old inference: a full page
-// means there is probably at least one more.
-func listTotalItems(res APIResponse[ListTorrentsData], offset, limit int) int {
-	if total, err := strconv.Atoi(res.Header.Get("X-Total-Count")); err == nil {
-		return total
+// listTotalItems is the `meta.total` the engine sends with every page. A page
+// that omits it (an older engine) is inferred the old way: a full page means
+// there is probably at least one more.
+func listTotalItems(page ListTorrentsPage, offset, limit int) int {
+	if page.Total > 0 {
+		return page.Total
 	}
-	count := len(res.Data)
+	count := len(page.Rows)
 	if count == 0 {
 		return 0
 	}
