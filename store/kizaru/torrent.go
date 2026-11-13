@@ -15,9 +15,10 @@ import (
 
 // Torrent mirrors Kizaru's torrent record.
 //
-// Id is the GLOBAL torrent id. The public item id every endpoint addresses is
-// UserTorrentID (user_torrents.id), which Kizaru fills on the add/list/detail
-// responses. The store uses UserTorrentID for every magnet id, never the hash.
+// Id is the GLOBAL torrent id, and it is what every Kizaru endpoint addresses —
+// including detail and removal. UserTorrentID is the caller's own library row:
+// Kizaru reports it for information only, and no request is made with it. The
+// store uses Id for every magnet id, never the hash.
 type Torrent struct {
 	Id            string `json:"id"`
 	UserTorrentID string `json:"userTorrentId"`
@@ -198,13 +199,13 @@ func (c APIClient) ListTorrents(params *ListTorrentsParams) (APIResponse[ListTor
 
 type GetTorrentParams struct {
 	Ctx
-	// Id is the userTorrentId returned by the add/list responses.
+	// Id is the global torrent id returned by the add/list/cache-check responses.
 	Id string
 }
 
 func (c APIClient) GetTorrent(params *GetTorrentParams) (APIResponse[TorrentDetailData], error) {
 	query := &url.Values{}
-	query.Set("id", params.Id)
+	query.Set("torrentId", params.Id)
 	params.Query = query
 	response := &Response[TorrentDetailData]{}
 	res, err := c.Request(http.MethodGet, "/api/v1/torrents/item", params, response)
@@ -222,7 +223,7 @@ type RemoveTorrentData struct {
 
 func (c APIClient) RemoveTorrent(params *RemoveTorrentParams) (APIResponse[RemoveTorrentData], error) {
 	query := &url.Values{}
-	query.Set("id", params.Id)
+	query.Set("torrentId", params.Id)
 	params.Query = query
 	response := &Response[struct{}]{}
 	res, err := c.Request(http.MethodDelete, "/api/v1/torrents/item", params, response)

@@ -133,7 +133,7 @@ func (c *StoreClient) AddMagnet(params *store.AddMagnetParams) (*store.AddMagnet
 
 	torrent := res.Data.Torrent
 	data := &store.AddMagnetData{
-		Id:      torrent.UserTorrentID,
+		Id:      torrent.Id,
 		Hash:    torrent.InfoHash,
 		Name:    torrent.Name,
 		Size:    torrent.TotalSize,
@@ -151,7 +151,7 @@ func (c *StoreClient) AddMagnet(params *store.AddMagnetParams) (*store.AddMagnet
 	// one. Only worth doing once the torrent is ready.
 	detail, err := c.client.GetTorrent(&GetTorrentParams{
 		Ctx: params.Ctx,
-		Id:  torrent.UserTorrentID,
+		Id:  torrent.Id,
 	})
 	if err == nil {
 		data.Status = magnetStatus(detail.Data.Torrent.Status)
@@ -180,7 +180,7 @@ func (c *StoreClient) GetMagnet(params *store.GetMagnetParams) (*store.GetMagnet
 
 	torrent := res.Data.Torrent
 	data := &store.GetMagnetData{
-		Id:      torrent.UserTorrentID,
+		Id:      torrent.Id,
 		Hash:    torrent.InfoHash,
 		Name:    torrent.Name,
 		Size:    torrent.TotalSize,
@@ -225,7 +225,7 @@ func (c *StoreClient) ListMagnets(params *store.ListMagnetsParams) (*store.ListM
 	}
 	for _, t := range res.Data.Rows {
 		data.Items = append(data.Items, store.ListMagnetsDataItem{
-			Id:      t.UserTorrentID,
+			Id:      t.Id,
 			Hash:    t.InfoHash,
 			Name:    t.Name,
 			Size:    t.TotalSize,
@@ -252,7 +252,7 @@ func listTotalItems(page ListTorrentsPage, offset int) int {
 }
 
 func (c *StoreClient) RemoveMagnet(params *store.RemoveMagnetParams) (*store.RemoveMagnetData, error) {
-	// Kizaru identifies an item by userTorrentId on removal.
+	// Removal addresses the torrent, like every other Kizaru endpoint.
 	_, err := c.client.RemoveTorrent(&RemoveTorrentParams{
 		Ctx: params.Ctx,
 		Id:  params.Id,

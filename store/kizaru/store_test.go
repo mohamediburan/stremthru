@@ -360,8 +360,8 @@ func TestAddMagnetReturnsPlayableFiles(t *testing.T) {
 			if r.URL.Path != "/api/v1/torrents/item" {
 				t.Errorf("path = %q, want the item endpoint", r.URL.Path)
 			}
-			if got := r.URL.Query().Get("id"); got != "ut1" {
-				t.Errorf("id = %q, want ut1", got)
+			if got := r.URL.Query().Get("torrentId"); got != "t1" {
+				t.Errorf("torrentId = %q, want t1", got)
 			}
 			_, _ = w.Write([]byte(`{"data":{"torrent":{"id":"t1","userTorrentId":"ut1","infoHash":"abc","name":"Show.S01","totalSize":50,"status":"cached"},"files":[{"id":"33333333-3333-3333-3333-333333333333","path":"Show.S01/e01.mkv","size":50}]}}`))
 		}
@@ -431,8 +431,8 @@ func TestListMagnetsUsesOffset(t *testing.T) {
 	if got := queries[0].Get("limit"); got != "2" {
 		t.Errorf("limit = %q, want 2", got)
 	}
-	if len(data.Items) != 1 || data.Items[0].Id != "ut3" {
-		t.Errorf("items = %+v, want just ut3", data.Items)
+	if len(data.Items) != 1 || data.Items[0].Id != "t3" {
+		t.Errorf("items = %+v, want just t3", data.Items)
 	}
 	if data.TotalItems != 3 {
 		t.Errorf("total = %d, want 3 (a lower bound: offset + rows)", data.TotalItems)
@@ -483,5 +483,36 @@ func TestResponseErrorShape(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `"error":"boom"`) {
 		t.Errorf("ResponseError JSON = %s", b)
+	}
+}
+
+// Every Kizaru endpoint addresses a torrent by its own id, detail and removal
+// included. Sending the library row id instead is a 400 answered far from here,
+// which is exactly how the previous id-drift stayed invisible.
+func TestItemEndpointsAddressTheTorrentId(t *testing.T) {
+	var got []url.Values
+	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.URL.Query())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"torrent":{"id":"t1","infoHash":"abc","name":"n","totalSize":1,"status":"cached"},"files":[]}}`))
+	})
+
+	if _, err := c.GetMagnet(&store.GetMagnetParams{Id: "t1"}); err != nil {
+		t.Fatalf("GetMagnet: %v", err)
+	}
+	if _, err := c.RemoveMagnet(&store.RemoveMagnetParams{Id: "t1"}); err != nil {
+		t.Fatalf("RemoveMagnet: %v", err)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("made %d requests, want 2", len(got))
+	}
+	for i, q := range got {
+		if v := q.Get("torrentId"); v != "t1" {
+			t.Errorf("request %d torrentId = %q, want t1", i, v)
+		}
+		if v := q.Get("id"); v != "" {
+			t.Errorf("request %d sent the retired id parameter (%q)", i, v)
+		}
 	}
 }
