@@ -24,12 +24,14 @@ type errorEnvelope struct {
 
 // ListMeta is the page metadata Kizaru sends beside the rows.
 //
-// The library endpoint deliberately publishes no total, only `hasMore`: a
-// whole-library aggregate on every page load was its dominant cost.
+// `Total` is a pointer because Kizaru omits it rather than approximate it: it is
+// absent when the count could not be served, and on any Kizaru too old to send
+// it. Absent is not zero.
 type ListMeta struct {
 	Offset  int  `json:"offset"`
 	Limit   int  `json:"limit"`
 	HasMore bool `json:"hasMore"`
+	Total   *int `json:"total"`
 }
 
 // ResponseError is an error Kizaru answered with.

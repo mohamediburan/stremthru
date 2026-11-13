@@ -176,10 +176,13 @@ type ListTorrentsParams struct {
 type ListTorrentsData []Torrent
 
 // ListTorrentsPage is one page plus the paging coordinates that travel in
-// `meta`. Kizaru deliberately publishes no library total, only `hasMore`.
+// `meta`.
 type ListTorrentsPage struct {
 	Rows    ListTorrentsData
 	HasMore bool
+	// Total is the exact number of matching rows. Nil when Kizaru omitted it,
+	// which means "unknown" — the caller falls back to the hasMore bound.
+	Total *int
 }
 
 func (c APIClient) ListTorrents(params *ListTorrentsParams) (APIResponse[ListTorrentsPage], error) {
@@ -193,6 +196,7 @@ func (c APIClient) ListTorrents(params *ListTorrentsParams) (APIResponse[ListTor
 	page := ListTorrentsPage{
 		Rows:    response.Data,
 		HasMore: response.Meta.HasMore,
+		Total:   response.Meta.Total,
 	}
 	return newAPIResponse(res, page), err
 }

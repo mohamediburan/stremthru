@@ -202,9 +202,8 @@ func (c *StoreClient) ListMagnets(params *store.ListMagnetsParams) (*store.ListM
 		limit = maxListLimit
 	}
 
-	// Kizaru pages by offset/limit and returns the page directly. `TotalItems`
-	// is a lower bound: the endpoint deliberately publishes no library total,
-	// only whether another row exists.
+	// Kizaru pages by offset/limit and returns the page directly, with an exact
+	// `meta.total` when it could count the filtered rows.
 	offset := params.Offset
 	if offset < 0 {
 		offset = 0
@@ -240,10 +239,15 @@ func (c *StoreClient) ListMagnets(params *store.ListMagnetsParams) (*store.ListM
 // maxListLimit is Kizaru's cap on a single page of the library.
 const maxListLimit = 100
 
-// listTotalItems is a lower bound, not a library total: Kizaru deliberately
-// publishes only `hasMore`, so the store can know the rows it saw plus at most
-// one more.
+// listTotalItems prefers Kizaru's exact `meta.total`.
+//
+// The lower bound is the fallback, not the design: it is what an older Kizaru
+// leaves us, and what the one response whose count failed leaves us — the rows
+// this page saw, plus at most one more.
 func listTotalItems(page ListTorrentsPage, offset int) int {
+	if page.Total != nil {
+		return *page.Total
+	}
 	total := offset + len(page.Rows)
 	if page.HasMore {
 		total++

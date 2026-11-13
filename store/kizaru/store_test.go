@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -404,7 +405,7 @@ func TestPlayableFilesRequiresReadyTorrent(t *testing.T) {
 }
 
 // ListMagnets must send offset/limit and use `meta.hasMore`, the shape the
-// current library endpoint publishes. It deliberately publishes no total.
+// current library endpoint publishes.
 func TestListMagnetsUsesOffset(t *testing.T) {
 	var queries []url.Values
 	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -415,7 +416,7 @@ func TestListMagnetsUsesOffset(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":[
 			{"id":"t3","userTorrentId":"ut3","infoHash":"h3","name":"c","totalSize":3,"status":"cached"}
-		],"meta":{"offset":2,"limit":2,"hasMore":false}}`))
+		],"meta":{"offset":2,"limit":2,"hasMore":false,"total":7}}`))
 	})
 
 	data, err := c.ListMagnets(&store.ListMagnetsParams{Limit: 2, Offset: 2})
@@ -434,8 +435,9 @@ func TestListMagnetsUsesOffset(t *testing.T) {
 	if len(data.Items) != 1 || data.Items[0].Id != "t3" {
 		t.Errorf("items = %+v, want just t3", data.Items)
 	}
-	if data.TotalItems != 3 {
-		t.Errorf("total = %d, want 3 (a lower bound: offset + rows)", data.TotalItems)
+	// The exact total wins over anything derived from the page.
+	if data.TotalItems != 7 {
+		t.Errorf("total = %d, want Kizaru's 7", data.TotalItems)
 	}
 }
 
@@ -455,6 +457,42 @@ func TestListMagnetsPastTheEndIsEmpty(t *testing.T) {
 	}
 	if data.TotalItems != 4 {
 		t.Errorf("total = %d, want the offset lower bound 4", data.TotalItems)
+	}
+}
+
+// An older Kizaru, or one whose count failed, sends no `total`; the store then
+// reports the bound it can prove instead of inventing a number.
+func TestListMagnetsFallsBackToTheTotalBound(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		meta  string
+		rows  int
+		bound int
+	}{
+		{"more rows exist", `{"offset":2,"limit":2,"hasMore":true}`, 2, 5},
+		{"last page", `{"offset":2,"limit":2,"hasMore":false}`, 1, 3},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rows := ""
+			for i := 0; i < c.rows; i++ {
+				if i > 0 {
+					rows += ","
+				}
+				rows += `{"id":"t` + strconv.Itoa(i) + `","infoHash":"h","name":"n","totalSize":1,"status":"cached"}`
+			}
+			client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"data":[` + rows + `],"meta":` + c.meta + `}`))
+			})
+
+			data, err := client.ListMagnets(&store.ListMagnetsParams{Limit: 2, Offset: 2})
+			if err != nil {
+				t.Fatalf("ListMagnets: %v", err)
+			}
+			if data.TotalItems != c.bound {
+				t.Errorf("total = %d, want the bound %d", data.TotalItems, c.bound)
+			}
+		})
 	}
 }
 
