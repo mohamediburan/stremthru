@@ -88,8 +88,9 @@ func (c *StoreClient) CheckMagnet(params *store.CheckMagnetParams) (*store.Check
 		hashes = append(hashes, magnet.Hash)
 	}
 
-	// One round trip: Kizaru already scopes the answer to this user's library and
-	// returns only files that are uploaded, so there is nothing to filter here.
+	// One round trip: Kizaru answers by hash and returns only files that are
+	// uploaded, so there is nothing to filter here. The hit carries the global
+	// torrentId, which the link token needs alongside the file id.
 	res, err := c.client.CheckTorrentsCached(&CheckTorrentsCachedParams{
 		Ctx:    params.Ctx,
 		Hashes: hashes,
@@ -105,7 +106,7 @@ func (c *StoreClient) CheckMagnet(params *store.CheckMagnetParams) (*store.Check
 			Magnet: "magnet:?xt=urn:btih:" + item.Hash,
 			Name:   item.Name,
 			Status: magnetStatus(item.Status),
-			Files:  magnetFiles(item.Files),
+			Files:  magnetFiles(item.TorrentID, item.Files),
 		})
 	}
 
@@ -156,7 +157,7 @@ func (c *StoreClient) AddMagnet(params *store.AddMagnetParams) (*store.AddMagnet
 		data.Status = magnetStatus(detail.Data.Torrent.Status)
 		data.Name = detail.Data.Torrent.Name
 		data.Size = detail.Data.Torrent.TotalSize
-		data.Files = playableFiles(detail.Data.Torrent.Status, detail.Data.Files)
+		data.Files = playableFiles(detail.Data.Torrent.Id, detail.Data.Torrent.Status, detail.Data.Files)
 	}
 
 	return data, nil
@@ -184,7 +185,7 @@ func (c *StoreClient) GetMagnet(params *store.GetMagnetParams) (*store.GetMagnet
 		Name:    torrent.Name,
 		Size:    torrent.TotalSize,
 		Status:  magnetStatus(torrent.Status),
-		Files:   playableFiles(torrent.Status, res.Data.Files),
+		Files:   playableFiles(torrent.Id, torrent.Status, res.Data.Files),
 		AddedAt: torrentAddedAt(torrent),
 	}
 
@@ -263,7 +264,7 @@ func (c *StoreClient) RemoveMagnet(params *store.RemoveMagnetParams) (*store.Rem
 }
 
 func (c *StoreClient) GenerateLink(params *store.GenerateLinkParams) (*store.GenerateLinkData, error) {
-	fileID, err := FileLink(params.Link).Parse()
+	torrentID, fileID, err := FileLink(params.Link).Parse()
 	if err != nil {
 		error := core.NewAPIError("invalid link")
 		error.StatusCode = http.StatusBadRequest
@@ -272,8 +273,9 @@ func (c *StoreClient) GenerateLink(params *store.GenerateLinkParams) (*store.Gen
 	}
 
 	res, err := c.client.GetStreamURL(&GetStreamURLParams{
-		Ctx:    params.Ctx,
-		FileID: fileID,
+		Ctx:       params.Ctx,
+		TorrentID: torrentID,
+		FileID:    fileID,
 	})
 	if err != nil {
 		return nil, err

@@ -114,6 +114,7 @@ func TestCheckMagnetMapsDetailedResponse(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"items":[{
+			"torrentId":"99999999-9999-9999-9999-999999999999",
 			"hash":"` + cachedHash + `",
 			"status":"cached",
 			"name":"Some.Movie.2024.1080p",
@@ -161,8 +162,9 @@ func TestCheckMagnetMapsDetailedResponse(t *testing.T) {
 	if item.Files[0].Size != 90 {
 		t.Errorf("file size = %d", item.Files[0].Size)
 	}
-	// The link token is handed back verbatim to GenerateLink.
-	if want := FileLink("").Create("11111111-1111-1111-1111-111111111111"); item.Files[0].Link != want {
+	// The link token is handed back verbatim to GenerateLink, and it carries the
+	// GLOBAL torrent id: Kizaru addresses a file by torrentId + fileId.
+	if want := "99999999-9999-9999-9999-999999999999:11111111-1111-1111-1111-111111111111"; item.Files[0].Link != want {
 		t.Errorf("file link = %q, want %q", item.Files[0].Link, want)
 	}
 }
@@ -174,18 +176,20 @@ func TestCheckMagnetMapsDetailedResponse(t *testing.T) {
 // like every other store's GenerateLink.
 func TestGenerateLinkUsesStreamEndpoint(t *testing.T) {
 	const signed = "https://cdn.example.com/presigned?sig=abc"
+	const torrentID = "11111111-1111-1111-1111-111111111111"
 	const fileID = "22222222-2222-2222-2222-222222222222"
 
-	var gotPath, gotFileID, gotAccept string
+	var gotPath, gotTorrentID, gotFileID, gotAccept string
 	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+		gotTorrentID = r.URL.Query().Get("torrentId")
 		gotFileID = r.URL.Query().Get("fileId")
 		gotAccept = r.Header.Get("Accept")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"url":"` + signed + `"}}`))
 	})
 
-	res, err := c.GenerateLink(&store.GenerateLinkParams{Link: FileLink("").Create(fileID)})
+	res, err := c.GenerateLink(&store.GenerateLinkParams{Link: FileLink("").Create(torrentID, fileID)})
 	if err != nil {
 		t.Fatalf("GenerateLink: %v", err)
 	}
@@ -194,6 +198,9 @@ func TestGenerateLinkUsesStreamEndpoint(t *testing.T) {
 	}
 	if gotPath != "/api/v1/torrents/files/stream" {
 		t.Errorf("path = %q, want /api/v1/torrents/files/stream", gotPath)
+	}
+	if gotTorrentID != torrentID {
+		t.Errorf("torrentId = %q, want %q", gotTorrentID, torrentID)
 	}
 	if gotFileID != fileID {
 		t.Errorf("fileId = %q, want %q", gotFileID, fileID)
@@ -210,7 +217,16 @@ func TestGenerateLinkRejectsMalformedToken(t *testing.T) {
 		t.Error("no request should be made for a malformed token")
 	})
 
-	for _, bad := range []string{"", "no-colon", "not-a-uuid", "hash:notanumber"} {
+	for _, bad := range []string{
+		"",
+		"no-colon",
+		"not-a-uuid",
+		"hash:notanumber",
+		// file id alone is not an address: the token needs both ids.
+		"22222222-2222-2222-2222-222222222222",
+		"11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222:extra",
+		"22222222-2222-2222-2222-222222222222:not-a-uuid",
+	} {
 		if _, err := c.GenerateLink(&store.GenerateLinkParams{Link: bad}); err == nil {
 			t.Errorf("GenerateLink(%q) accepted a malformed token", bad)
 		}
@@ -361,8 +377,8 @@ func TestAddMagnetReturnsPlayableFiles(t *testing.T) {
 	if len(data.Files) != 1 {
 		t.Fatalf("got %d files, want 1", len(data.Files))
 	}
-	if data.Files[0].Link != FileLink("").Create("33333333-3333-3333-3333-333333333333") {
-		t.Errorf("file link = %q, want the file id token", data.Files[0].Link)
+	if want := "t1:33333333-3333-3333-3333-333333333333"; data.Files[0].Link != want {
+		t.Errorf("file link = %q, want %q", data.Files[0].Link, want)
 	}
 	if data.Magnet == "" {
 		t.Error("magnet must be echoed back for the client to keep")
@@ -376,12 +392,12 @@ func TestPlayableFilesRequiresReadyTorrent(t *testing.T) {
 	files := []TorrentFile{{ID: "44444444-4444-4444-4444-444444444444", Path: "Show.S01/e01.mkv", Size: 10}}
 
 	for _, waiting := range []string{"meta_pending", "downloading", "uploading", "error", ""} {
-		if got := playableFiles(waiting, files); len(got) != 0 {
+		if got := playableFiles("t1", waiting, files); len(got) != 0 {
 			t.Errorf("%q: got %d files, want 0", waiting, len(got))
 		}
 	}
 	for _, ready := range []string{"cached", "uploaded", "seeding"} {
-		if got := playableFiles(ready, files); len(got) != 1 {
+		if got := playableFiles("t1", ready, files); len(got) != 1 {
 			t.Errorf("%q: got %d files, want 1", ready, len(got))
 		}
 	}
@@ -443,17 +459,18 @@ func TestListMagnetsPastTheEndIsEmpty(t *testing.T) {
 }
 
 func TestFileLinkRoundTrip(t *testing.T) {
-	for _, id := range []string{
+	const torrentID = "77777777-7777-7777-7777-777777777777"
+	for _, fileID := range []string{
 		"55555555-5555-5555-5555-555555555555",
 		"66666666-6666-6666-6666-666666666666",
 	} {
-		token := FileLink("").Create(id)
-		got, err := FileLink(token).Parse()
+		token := FileLink("").Create(torrentID, fileID)
+		gotTorrentID, gotFileID, err := FileLink(token).Parse()
 		if err != nil {
 			t.Fatalf("Parse(%q): %v", token, err)
 		}
-		if got != id {
-			t.Errorf("round trip %q -> %q", token, got)
+		if gotTorrentID != torrentID || gotFileID != fileID {
+			t.Errorf("round trip %q -> %q:%q, want %q:%q", token, gotTorrentID, gotFileID, torrentID, fileID)
 		}
 	}
 }

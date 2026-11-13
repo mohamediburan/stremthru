@@ -69,19 +69,28 @@ func magnetStatus(kizaruStatus string) store.MagnetStatus {
 }
 
 // FileLink is the opaque token handed to the client with each file and posted
-// back verbatim to GenerateLink. It is the Kizaru file id; the API addresses a
-// file by id, not by an index or an infohash.
+// back verbatim to GenerateLink. Kizaru's stream endpoint takes `torrentId` and
+// `fileId` together — the file id alone is not an address — so the token carries
+// both: "<globalTorrentId>:<fileId>". Neither id is a secret; the API still
+// authorises the request.
 type FileLink string
 
-func (l FileLink) Create(fileID string) string {
-	return fileID
+func (l FileLink) Create(torrentID, fileID string) string {
+	return torrentID + ":" + fileID
 }
 
-func (l FileLink) Parse() (fileID string, err error) {
-	if _, err := uuid.Parse(string(l)); err != nil {
-		return "", fmt.Errorf("invalid link")
+func (l FileLink) Parse() (torrentID, fileID string, err error) {
+	parts := strings.Split(string(l), ":")
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("invalid link")
 	}
-	return string(l), nil
+	if _, err := uuid.Parse(parts[0]); err != nil {
+		return "", "", fmt.Errorf("invalid link")
+	}
+	if _, err := uuid.Parse(parts[1]); err != nil {
+		return "", "", fmt.Errorf("invalid link")
+	}
+	return parts[0], parts[1], nil
 }
 
 type CheckTorrentsCachedParams struct {
@@ -98,6 +107,10 @@ type CachedFile struct {
 }
 
 type CheckTorrentsCachedDataItem struct {
+	// TorrentID is the GLOBAL torrents.id. It is what a file link token needs
+	// alongside the file id, and it is present whether or not the torrent is in
+	// the caller's library — a cache hit is content-addressed.
+	TorrentID string       `json:"torrentId"`
 	Hash      string       `json:"hash"`
 	Status    string       `json:"status"`
 	Name      string       `json:"name"`
@@ -109,12 +122,13 @@ type CheckTorrentsCachedData struct {
 	Items []CheckTorrentsCachedDataItem `json:"items"`
 }
 
-// CheckTorrentsCached asks Kizaru which of these hashes are cached AND playable
-// by the caller, with their file lists.
+// CheckTorrentsCached asks Kizaru which of these hashes are cached, with their
+// file lists.
 //
-// Kizaru's cache-check answers all of that in one round trip: it already scopes
-// to the caller's library and reports only uploaded files. Older builds returned
-// a flat {"hash": bool} map, which forced a detail request per hit just to learn
+// Kizaru's cache-check answers all of that in one round trip: it is
+// content-addressed, so a hit comes back whether or not the torrent is in the
+// caller's library, and it reports only uploaded files. Older builds returned a
+// flat {"hash": bool} map, which forced a detail request per hit just to learn
 // the filenames.
 func (c APIClient) CheckTorrentsCached(params *CheckTorrentsCachedParams) (APIResponse[CheckTorrentsCachedData], error) {
 	empty := CheckTorrentsCachedData{Items: []CheckTorrentsCachedDataItem{}}
@@ -217,7 +231,8 @@ func (c APIClient) RemoveTorrent(params *RemoveTorrentParams) (APIResponse[Remov
 
 type GetStreamURLParams struct {
 	Ctx
-	FileID string
+	TorrentID string
+	FileID    string
 }
 
 type GetStreamURLData struct {
@@ -232,6 +247,7 @@ type GetStreamURLData struct {
 // Kizaru side, so either would do.
 func (c APIClient) GetStreamURL(params *GetStreamURLParams) (APIResponse[GetStreamURLData], error) {
 	query := &url.Values{}
+	query.Set("torrentId", params.TorrentID)
 	query.Set("fileId", params.FileID)
 	params.Query = query
 	headers := http.Header{}
@@ -261,12 +277,12 @@ func canonicalPath(path string) string {
 	return cleaned
 }
 
-func magnetFiles(files []CachedFile) []store.MagnetFile {
+func magnetFiles(torrentID string, files []CachedFile) []store.MagnetFile {
 	out := make([]store.MagnetFile, 0, len(files))
 	for i, f := range files {
 		out = append(out, store.MagnetFile{
 			Idx:  i,
-			Link: FileLink("").Create(f.ID),
+			Link: FileLink("").Create(torrentID, f.ID),
 			Path: canonicalPath(f.Path),
 			Name: f.Name,
 			Size: f.Size,
@@ -282,7 +298,7 @@ func magnetFiles(files []CachedFile) []store.MagnetFile {
 // the API can transfer. The per-file s3Key this used to test is no longer
 // published, which made the old filter drop every file; the status is the
 // signal now, and it is the same one the engine gates /stream on.
-func playableFiles(status string, files []TorrentFile) []store.MagnetFile {
+func playableFiles(torrentID, status string, files []TorrentFile) []store.MagnetFile {
 	out := []store.MagnetFile{}
 	if magnetStatus(status) != store.MagnetStatusCached {
 		return out
@@ -294,7 +310,7 @@ func playableFiles(status string, files []TorrentFile) []store.MagnetFile {
 		}
 		out = append(out, store.MagnetFile{
 			Idx:  i,
-			Link: FileLink("").Create(f.ID),
+			Link: FileLink("").Create(torrentID, f.ID),
 			Path: canonicalPath(f.Path),
 			Name: name,
 			Size: f.Size,
