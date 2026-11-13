@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -117,7 +118,7 @@ func TestCheckMagnetMapsDetailedResponse(t *testing.T) {
 			"status":"cached",
 			"name":"Some.Movie.2024.1080p",
 			"totalSize":100,
-			"files":[{"fileIndex":0,"path":"Some.Movie.2024.1080p/movie.mkv","name":"movie.mkv","size":90}]
+			"files":[{"id":"11111111-1111-1111-1111-111111111111","path":"Some.Movie.2024.1080p/movie.mkv","name":"movie.mkv","size":90}]
 		}]}}`))
 	})
 
@@ -161,7 +162,7 @@ func TestCheckMagnetMapsDetailedResponse(t *testing.T) {
 		t.Errorf("file size = %d", item.Files[0].Size)
 	}
 	// The link token is handed back verbatim to GenerateLink.
-	if want := FileLink("").Create(cachedHash, 0); item.Files[0].Link != want {
+	if want := FileLink("").Create("11111111-1111-1111-1111-111111111111"); item.Files[0].Link != want {
 		t.Errorf("file link = %q, want %q", item.Files[0].Link, want)
 	}
 }
@@ -173,24 +174,34 @@ func TestCheckMagnetMapsDetailedResponse(t *testing.T) {
 // like every other store's GenerateLink.
 func TestGenerateLinkUsesStreamEndpoint(t *testing.T) {
 	const signed = "https://cdn.example.com/presigned?sig=abc"
-	const hash = "dddddddddddddddddddddddddddddddddddddddd"
+	const fileID = "22222222-2222-2222-2222-222222222222"
 
-	var gotPath string
+	var gotPath, gotFileID, gotAccept string
 	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+		gotFileID = r.URL.Query().Get("fileId")
+		gotAccept = r.Header.Get("Accept")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"url":"` + signed + `"}}`))
 	})
 
-	res, err := c.GenerateLink(&store.GenerateLinkParams{Link: FileLink("").Create(hash, 7)})
+	res, err := c.GenerateLink(&store.GenerateLinkParams{Link: FileLink("").Create(fileID)})
 	if err != nil {
 		t.Fatalf("GenerateLink: %v", err)
 	}
 	if res.Link != signed {
 		t.Errorf("link = %q, want the presigned url from the JSON body", res.Link)
 	}
-	if want := "/api/v1/torrents/" + hash + "/files/7/stream"; gotPath != want {
-		t.Errorf("path = %q, want %q", gotPath, want)
+	if gotPath != "/api/v1/torrents/files/stream" {
+		t.Errorf("path = %q, want /api/v1/torrents/files/stream", gotPath)
+	}
+	if gotFileID != fileID {
+		t.Errorf("fileId = %q, want %q", gotFileID, fileID)
+	}
+	// Without this header the endpoint is a 307 and the HTTP client would follow
+	// it into the media body instead of decoding {"url": ...}.
+	if gotAccept != "application/json" {
+		t.Errorf("Accept = %q, want application/json", gotAccept)
 	}
 }
 
@@ -199,7 +210,7 @@ func TestGenerateLinkRejectsMalformedToken(t *testing.T) {
 		t.Error("no request should be made for a malformed token")
 	})
 
-	for _, bad := range []string{"", "no-colon", "hash:notanumber", "hash:-1"} {
+	for _, bad := range []string{"", "no-colon", "not-a-uuid", "hash:notanumber"} {
 		if _, err := c.GenerateLink(&store.GenerateLinkParams{Link: bad}); err == nil {
 			t.Errorf("GenerateLink(%q) accepted a malformed token", bad)
 		}
@@ -318,10 +329,25 @@ func TestAddMagnetReturnsPlayableFiles(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method {
 		case http.MethodPost:
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("ParseForm: %v", err)
+			}
+			if got := r.PostForm.Get("magnetUri"); got != "magnet:?xt=urn:btih:abc" {
+				t.Errorf("magnetUri = %q, want the magnet as form data", got)
+			}
+			if got := r.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/x-www-form-urlencoded") {
+				t.Errorf("Content-Type = %q, want form encoding", got)
+			}
 			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"data":{"message":"Torrent registered successfully","torrent":{"id":"t1","infoHash":"abc","name":"Show.S01","totalSize":50,"status":"cached"}}}`))
+			_, _ = w.Write([]byte(`{"data":{"message":"Torrent registered successfully","torrent":{"id":"t1","userTorrentId":"ut1","infoHash":"abc","name":"Show.S01","totalSize":50,"status":"cached"}}}`))
 		case http.MethodGet:
-			_, _ = w.Write([]byte(`{"data":{"torrent":{"id":"t1","infoHash":"abc","name":"Show.S01","totalSize":50,"status":"cached"},"files":[{"fileIndex":2,"path":"Show.S01/e01.mkv","size":50}]}}`))
+			if r.URL.Path != "/api/v1/torrents/item" {
+				t.Errorf("path = %q, want the item endpoint", r.URL.Path)
+			}
+			if got := r.URL.Query().Get("id"); got != "ut1" {
+				t.Errorf("id = %q, want ut1", got)
+			}
+			_, _ = w.Write([]byte(`{"data":{"torrent":{"id":"t1","userTorrentId":"ut1","infoHash":"abc","name":"Show.S01","totalSize":50,"status":"cached"},"files":[{"id":"33333333-3333-3333-3333-333333333333","path":"Show.S01/e01.mkv","size":50}]}}`))
 		}
 	})
 
@@ -335,8 +361,8 @@ func TestAddMagnetReturnsPlayableFiles(t *testing.T) {
 	if len(data.Files) != 1 {
 		t.Fatalf("got %d files, want 1", len(data.Files))
 	}
-	if data.Files[0].Link != FileLink("").Create("abc", 2) {
-		t.Errorf("file link = %q, want the abc:2 token", data.Files[0].Link)
+	if data.Files[0].Link != FileLink("").Create("33333333-3333-3333-3333-333333333333") {
+		t.Errorf("file link = %q, want the file id token", data.Files[0].Link)
 	}
 	if data.Magnet == "" {
 		t.Error("magnet must be echoed back for the client to keep")
@@ -347,61 +373,53 @@ func TestAddMagnetReturnsPlayableFiles(t *testing.T) {
 // so the status is the only signal there is — and it is the right one, because
 // a torrent is marked `cached` only once every file has been uploaded.
 func TestPlayableFilesRequiresReadyTorrent(t *testing.T) {
-	files := []TorrentFile{{FileIndex: 0, Path: "Show.S01/e01.mkv", Size: 10}}
+	files := []TorrentFile{{ID: "44444444-4444-4444-4444-444444444444", Path: "Show.S01/e01.mkv", Size: 10}}
 
 	for _, waiting := range []string{"meta_pending", "downloading", "uploading", "error", ""} {
-		if got := playableFiles("abc", waiting, files); len(got) != 0 {
+		if got := playableFiles(waiting, files); len(got) != 0 {
 			t.Errorf("%q: got %d files, want 0", waiting, len(got))
 		}
 	}
 	for _, ready := range []string{"cached", "uploaded", "seeding"} {
-		if got := playableFiles("abc", ready, files); len(got) != 1 {
+		if got := playableFiles(ready, files); len(got) != 1 {
 			t.Errorf("%q: got %d files, want 1", ready, len(got))
 		}
 	}
 }
 
-// ListMagnets must follow X-Next-Cursor. Kizaru's list endpoint is keyset-paged
-// and ignores `offset`, so a client that still sends one is answered with page
-// one forever — which is what the previous implementation did.
-func TestListMagnetsFollowsCursor(t *testing.T) {
-	var cursors []string
+// ListMagnets must send offset/limit and use `meta.hasMore`, the shape the
+// current library endpoint publishes. It deliberately publishes no total.
+func TestListMagnetsUsesOffset(t *testing.T) {
+	var queries []url.Values
 	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/torrents" {
 			t.Errorf("path = %q, want the library endpoint", r.URL.Path)
 		}
-		if off := r.URL.Query().Get("offset"); off != "" {
-			t.Errorf("sent offset=%q, which the engine ignores", off)
-		}
-		cursor := r.URL.Query().Get("cursor")
-		cursors = append(cursors, cursor)
-
+		queries = append(queries, r.URL.Query())
 		w.Header().Set("Content-Type", "application/json")
-		if cursor == "" {
-			_, _ = w.Write([]byte(`{"data":[
-				{"id":"t1","infoHash":"h1","name":"a","totalSize":1,"status":"cached"},
-				{"id":"t2","infoHash":"h2","name":"b","totalSize":2,"status":"downloading"}
-			],"meta":{"total":3,"nextCursor":"page-2"}}`))
-			return
-		}
-		if cursor != "page-2" {
-			t.Errorf("cursor = %q, want page-2", cursor)
-		}
-		_, _ = w.Write([]byte(`{"data":[{"id":"t3","infoHash":"h3","name":"c","totalSize":3,"status":"cached"}],"meta":{"total":3}}`))
+		_, _ = w.Write([]byte(`{"data":[
+			{"id":"t3","userTorrentId":"ut3","infoHash":"h3","name":"c","totalSize":3,"status":"cached"}
+		],"meta":{"offset":2,"limit":2,"hasMore":false}}`))
 	})
 
 	data, err := c.ListMagnets(&store.ListMagnetsParams{Limit: 2, Offset: 2})
 	if err != nil {
 		t.Fatalf("ListMagnets: %v", err)
 	}
-	if len(cursors) != 2 || cursors[0] != "" || cursors[1] != "page-2" {
-		t.Errorf("cursors = %q, want [\"\" \"page-2\"]", cursors)
+	if len(queries) != 1 {
+		t.Fatalf("made %d requests, want 1", len(queries))
 	}
-	if len(data.Items) != 1 || data.Items[0].Id != "t3" {
-		t.Errorf("items = %+v, want just t3", data.Items)
+	if got := queries[0].Get("offset"); got != "2" {
+		t.Errorf("offset = %q, want 2", got)
+	}
+	if got := queries[0].Get("limit"); got != "2" {
+		t.Errorf("limit = %q, want 2", got)
+	}
+	if len(data.Items) != 1 || data.Items[0].Id != "ut3" {
+		t.Errorf("items = %+v, want just ut3", data.Items)
 	}
 	if data.TotalItems != 3 {
-		t.Errorf("total = %d, want 3 from X-Total-Count", data.TotalItems)
+		t.Errorf("total = %d, want 3 (a lower bound: offset + rows)", data.TotalItems)
 	}
 }
 
@@ -409,7 +427,7 @@ func TestListMagnetsFollowsCursor(t *testing.T) {
 func TestListMagnetsPastTheEndIsEmpty(t *testing.T) {
 	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"id":"t1","infoHash":"h1","name":"a","totalSize":1,"status":"cached"}],"meta":{"total":1}}`))
+		_, _ = w.Write([]byte(`{"data":[],"meta":{"offset":4,"limit":2,"hasMore":false}}`))
 	})
 
 	data, err := c.ListMagnets(&store.ListMagnetsParams{Limit: 2, Offset: 4})
@@ -419,20 +437,23 @@ func TestListMagnetsPastTheEndIsEmpty(t *testing.T) {
 	if len(data.Items) != 0 {
 		t.Errorf("items = %+v, want none", data.Items)
 	}
-	if data.TotalItems != 1 {
-		t.Errorf("total = %d, want 1", data.TotalItems)
+	if data.TotalItems != 4 {
+		t.Errorf("total = %d, want the offset lower bound 4", data.TotalItems)
 	}
 }
 
 func TestFileLinkRoundTrip(t *testing.T) {
-	for _, index := range []int{0, 1, 42, 999} {
-		token := FileLink("").Create("deadbeef", index)
-		gotHash, gotIndex, err := FileLink(token).Parse()
+	for _, id := range []string{
+		"55555555-5555-5555-5555-555555555555",
+		"66666666-6666-6666-6666-666666666666",
+	} {
+		token := FileLink("").Create(id)
+		got, err := FileLink(token).Parse()
 		if err != nil {
 			t.Fatalf("Parse(%q): %v", token, err)
 		}
-		if gotHash != "deadbeef" || gotIndex != index {
-			t.Errorf("round trip %q -> %q/%d", token, gotHash, gotIndex)
+		if got != id {
+			t.Errorf("round trip %q -> %q", token, got)
 		}
 	}
 }

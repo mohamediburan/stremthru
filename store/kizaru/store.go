@@ -105,7 +105,7 @@ func (c *StoreClient) CheckMagnet(params *store.CheckMagnetParams) (*store.Check
 			Magnet: "magnet:?xt=urn:btih:" + item.Hash,
 			Name:   item.Name,
 			Status: magnetStatus(item.Status),
-			Files:  magnetFiles(item.Hash, item.Files),
+			Files:  magnetFiles(item.Files),
 		})
 	}
 
@@ -132,7 +132,7 @@ func (c *StoreClient) AddMagnet(params *store.AddMagnetParams) (*store.AddMagnet
 
 	torrent := res.Data.Torrent
 	data := &store.AddMagnetData{
-		Id:      torrent.Id,
+		Id:      torrent.UserTorrentID,
 		Hash:    torrent.InfoHash,
 		Name:    torrent.Name,
 		Size:    torrent.TotalSize,
@@ -149,14 +149,14 @@ func (c *StoreClient) AddMagnet(params *store.AddMagnetParams) (*store.AddMagnet
 	// Kizaru's add response carries no file list, so fetch the detail to build
 	// one. Only worth doing once the torrent is ready.
 	detail, err := c.client.GetTorrent(&GetTorrentParams{
-		Ctx:  params.Ctx,
-		Hash: torrent.InfoHash,
+		Ctx: params.Ctx,
+		Id:  torrent.UserTorrentID,
 	})
 	if err == nil {
 		data.Status = magnetStatus(detail.Data.Torrent.Status)
 		data.Name = detail.Data.Torrent.Name
 		data.Size = detail.Data.Torrent.TotalSize
-		data.Files = playableFiles(torrent.InfoHash, detail.Data.Torrent.Status, detail.Data.Files)
+		data.Files = playableFiles(detail.Data.Torrent.Status, detail.Data.Files)
 	}
 
 	return data, nil
@@ -170,8 +170,8 @@ func (c *StoreClient) GetMagnet(params *store.GetMagnetParams) (*store.GetMagnet
 	}
 
 	res, err := c.client.GetTorrent(&GetTorrentParams{
-		Ctx:  params.Ctx,
-		Hash: params.Id,
+		Ctx: params.Ctx,
+		Id:  params.Id,
 	})
 	if err != nil {
 		return nil, err
@@ -179,12 +179,12 @@ func (c *StoreClient) GetMagnet(params *store.GetMagnetParams) (*store.GetMagnet
 
 	torrent := res.Data.Torrent
 	data := &store.GetMagnetData{
-		Id:      torrent.Id,
+		Id:      torrent.UserTorrentID,
 		Hash:    torrent.InfoHash,
 		Name:    torrent.Name,
 		Size:    torrent.TotalSize,
 		Status:  magnetStatus(torrent.Status),
-		Files:   playableFiles(torrent.InfoHash, torrent.Status, res.Data.Files),
+		Files:   playableFiles(torrent.Status, res.Data.Files),
 		AddedAt: torrentAddedAt(torrent),
 	}
 
@@ -201,63 +201,36 @@ func (c *StoreClient) ListMagnets(params *store.ListMagnetsParams) (*store.ListM
 		limit = maxListLimit
 	}
 
-	// Kizaru pages by keyset cursor, not by offset: the head of the list moves
-	// whenever a torrent is added, so an OFFSET would repeat or skip a row — and
-	// the engine ignores the parameter outright, which made every page after the
-	// first re-serve page one. The store interface still pages by position, so
-	// walk the cursor chain from the head to the page the caller asked for and
-	// drop the remainder. Bounded by offset/limit round trips.
+	// Kizaru pages by offset/limit and returns the page directly. `TotalItems`
+	// is a lower bound: the endpoint deliberately publishes no library total,
+	// only whether another row exists.
 	offset := params.Offset
 	if offset < 0 {
 		offset = 0
 	}
-	skip := offset % limit
 
-	var res APIResponse[ListTorrentsPage]
-	var err error
-	cursor := ""
-	for remaining := offset / limit; ; remaining-- {
-		res, err = c.client.ListTorrents(&ListTorrentsParams{
-			Ctx:    params.Ctx,
-			Limit:  limit,
-			Cursor: cursor,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if remaining <= 0 {
-			break
-		}
-		cursor = res.Data.NextCursor
-		if cursor == "" {
-			// The library ended before that offset: there is no such page.
-			return &store.ListMagnetsData{
-				Items:      []store.ListMagnetsDataItem{},
-				TotalItems: listTotalItems(res.Data, offset, limit),
-			}, nil
-		}
+	res, err := c.client.ListTorrents(&ListTorrentsParams{
+		Ctx:    params.Ctx,
+		Limit:  limit,
+		Offset: offset,
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	data := &store.ListMagnetsData{
 		Items:      []store.ListMagnetsDataItem{},
-		TotalItems: listTotalItems(res.Data, offset, limit),
+		TotalItems: listTotalItems(res.Data, offset),
 	}
 	for _, t := range res.Data.Rows {
 		data.Items = append(data.Items, store.ListMagnetsDataItem{
-			Id:      t.Id,
+			Id:      t.UserTorrentID,
 			Hash:    t.InfoHash,
 			Name:    t.Name,
 			Size:    t.TotalSize,
 			Status:  magnetStatus(t.Status),
 			AddedAt: torrentAddedAt(t),
 		})
-	}
-	if skip > 0 {
-		if skip >= len(data.Items) {
-			data.Items = []store.ListMagnetsDataItem{}
-		} else {
-			data.Items = data.Items[skip:]
-		}
 	}
 
 	return data, nil
@@ -266,29 +239,22 @@ func (c *StoreClient) ListMagnets(params *store.ListMagnetsParams) (*store.ListM
 // maxListLimit is Kizaru's cap on a single page of the library.
 const maxListLimit = 100
 
-// listTotalItems is the `meta.total` the engine sends with every page. A page
-// that omits it (an older engine) is inferred the old way: a full page means
-// there is probably at least one more.
-func listTotalItems(page ListTorrentsPage, offset, limit int) int {
-	if page.Total > 0 {
-		return page.Total
-	}
-	count := len(page.Rows)
-	if count == 0 {
-		return 0
-	}
-	total := offset + count
-	if count == limit {
+// listTotalItems is a lower bound, not a library total: Kizaru deliberately
+// publishes only `hasMore`, so the store can know the rows it saw plus at most
+// one more.
+func listTotalItems(page ListTorrentsPage, offset int) int {
+	total := offset + len(page.Rows)
+	if page.HasMore {
 		total++
 	}
 	return total
 }
 
 func (c *StoreClient) RemoveMagnet(params *store.RemoveMagnetParams) (*store.RemoveMagnetData, error) {
-	// Kizaru identifies torrents by info hash.
+	// Kizaru identifies an item by userTorrentId on removal.
 	_, err := c.client.RemoveTorrent(&RemoveTorrentParams{
-		Ctx:  params.Ctx,
-		Hash: params.Id,
+		Ctx: params.Ctx,
+		Id:  params.Id,
 	})
 	if err != nil {
 		return nil, err
@@ -297,7 +263,7 @@ func (c *StoreClient) RemoveMagnet(params *store.RemoveMagnetParams) (*store.Rem
 }
 
 func (c *StoreClient) GenerateLink(params *store.GenerateLinkParams) (*store.GenerateLinkData, error) {
-	hash, fileIndex, err := FileLink(params.Link).Parse()
+	fileID, err := FileLink(params.Link).Parse()
 	if err != nil {
 		error := core.NewAPIError("invalid link")
 		error.StatusCode = http.StatusBadRequest
@@ -306,9 +272,8 @@ func (c *StoreClient) GenerateLink(params *store.GenerateLinkParams) (*store.Gen
 	}
 
 	res, err := c.client.GetStreamURL(&GetStreamURLParams{
-		Ctx:       params.Ctx,
-		Hash:      hash,
-		FileIndex: fileIndex,
+		Ctx:    params.Ctx,
+		FileID: fileID,
 	})
 	if err != nil {
 		return nil, err

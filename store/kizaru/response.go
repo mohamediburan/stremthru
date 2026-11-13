@@ -22,11 +22,14 @@ type errorEnvelope struct {
 	} `json:"error"`
 }
 
-// ListMeta is the page metadata Kizaru sends beside the rows. It used to travel
-// as X-Total-Count / X-Next-Cursor headers.
+// ListMeta is the page metadata Kizaru sends beside the rows.
+//
+// The library endpoint deliberately publishes no total, only `hasMore`: a
+// whole-library aggregate on every page load was its dominant cost.
 type ListMeta struct {
-	Total      int    `json:"total"`
-	NextCursor string `json:"nextCursor"`
+	Offset  int  `json:"offset"`
+	Limit   int  `json:"limit"`
+	HasMore bool `json:"hasMore"`
 }
 
 // ResponseError is an error Kizaru answered with.
