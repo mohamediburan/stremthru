@@ -101,7 +101,11 @@ jobs:
           {
             echo 'DOCKER_IMAGE_TAGS<<EOF'
             for tag in ${TAGS}; do
-            echo "ghcr.io/mohamediburan/stremthru:${tag}"
+            # Owner from the repository, not a literal: the fork moved from a
+            # personal account to the kizaru-labs org, and GITHUB_TOKEN only has
+            # write access to its own owner's namespace, so a hardcoded owner
+            # fails the push after any future move.
+            echo "ghcr.io/${GITHUB_REPOSITORY,,}:${tag}"
             done
             echo EOF
           } >> "${GITHUB_ENV}"
